@@ -67,7 +67,10 @@ def _read_db_url_from_db_connection_txt() -> Optional[str]:
     """
     candidates = [
         # When running within monorepo workspace
-        Path(__file__).resolve().parents[4] / "note-organizer-235578-235673" / "postgres_database" / "db_connection.txt",
+        Path(__file__).resolve().parents[4]
+        / "note-organizer-235578-235673"
+        / "postgres_database"
+        / "db_connection.txt",
         # Relative heuristic in case workspace naming changes
         Path(__file__).resolve().parents[4] / "postgres_database" / "db_connection.txt",
         Path(__file__).resolve().parents[3] / "postgres_database" / "db_connection.txt",
@@ -102,6 +105,20 @@ def _build_postgres_url_from_parts(
     return f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{db}"
 
 
+def _normalize_postgres_url(url: str) -> str:
+    """Normalize various postgres URL forms into a SQLAlchemy psycopg2 URL."""
+    normalized = url.strip().replace("postgres://", "postgresql://", 1)
+    if normalized.startswith("postgresql://"):
+        normalized = normalized.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return normalized
+
+
+def _has_credentials(url: str) -> bool:
+    """Return True if a URL appears to include userinfo (user[:pass]@)."""
+    # Works for postgresql://user:pass@host/... and postgresql://user@host/...
+    return "://" in url and "@" in url.split("://", 1)[1].split("/", 1)[0]
+
+
 @lru_cache
 def get_settings() -> Settings:
     """PUBLIC_INTERFACE
@@ -127,11 +144,29 @@ def get_settings() -> Settings:
         cors_allow_origins=os.getenv("CORS_ALLOW_ORIGINS", "*"),
     )
 
+    # Prefer explicit URL if provided; however, if it lacks credentials (common in some envs),
+    # augment it using POSTGRES_USER/POSTGRES_PASSWORD/POSTGRES_DB/POSTGRES_PORT.
     if s.postgres_url:
-        # Ensure SQLAlchemy driver prefix is present
-        if s.postgres_url.startswith("postgresql://") or s.postgres_url.startswith("postgres://"):
-            s.postgres_url = s.postgres_url.replace("postgres://", "postgresql://", 1)
-            s.postgres_url = s.postgres_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+        raw = s.postgres_url.strip()
+        # If the URL already includes credentials, just normalize it.
+        if _has_credentials(raw):
+            s.postgres_url = _normalize_postgres_url(raw)
+            return s
+
+        # Otherwise, attempt to build a full URL from parts (credentials + host/port/db).
+        built = _build_postgres_url_from_parts(
+            user=s.postgres_user,
+            password=s.postgres_password,
+            host=s.postgres_host,
+            port=s.postgres_port,
+            db=s.postgres_db,
+        )
+        if built:
+            s.postgres_url = built
+            return s
+
+        # Fall back to normalizing the raw URL (may still work in envs with peer auth).
+        s.postgres_url = _normalize_postgres_url(raw)
         return s
 
     built = _build_postgres_url_from_parts(
@@ -145,12 +180,23 @@ def get_settings() -> Settings:
         s.postgres_url = built
         return s
 
+    # Authoritative fallback for this project: db_connection.txt
     fallback = _read_db_url_from_db_connection_txt()
     if fallback:
-        fallback = fallback.replace("postgres://", "postgresql://", 1)
-        if fallback.startswith("postgresql://"):
-            fallback = fallback.replace("postgresql://", "postgresql+psycopg2://", 1)
-        s.postgres_url = fallback
+        # If db_connection.txt lacks credentials, try to augment with POSTGRES_* parts.
+        if not _has_credentials(fallback):
+            built = _build_postgres_url_from_parts(
+                user=s.postgres_user,
+                password=s.postgres_password,
+                host=s.postgres_host,
+                port=s.postgres_port,
+                db=s.postgres_db,
+            )
+            if built:
+                s.postgres_url = built
+                return s
+
+        s.postgres_url = _normalize_postgres_url(fallback)
         return s
 
     # Leave as None; app startup will raise a helpful error.

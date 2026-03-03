@@ -22,9 +22,20 @@ app = FastAPI(
     openapi_tags=openapi_tags,
 )
 
+def _parse_cors_origins(raw: str | None) -> list[str]:
+    """Parse comma-separated CORS origins.
+
+    Supports '*', empty, and standard comma-separated URL origins.
+    """
+    if not raw:
+        return ["*"]
+    cleaned = [o.strip() for o in raw.split(",") if o.strip()]
+    return cleaned or ["*"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.cors_allow_origins.split(",")] if settings.cors_allow_origins else ["*"],
+    allow_origins=_parse_cors_origins(settings.cors_allow_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
